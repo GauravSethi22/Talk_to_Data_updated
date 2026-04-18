@@ -20,13 +20,15 @@ class TableDescription:
         description: str,
         columns: List[Dict[str, str]],
         relationships: Optional[List[str]] = None,
-        sample_values: Optional[Dict[str, Any]] = None
+        sample_values: Optional[Dict[str, Any]] = None,
+        session_id: Optional[str] = None
     ):
         self.table_name = table_name
         self.description = description
         self.columns = columns
         self.relationships = relationships or []
         self.sample_values = sample_values or {}
+        self.session_id = session_id
 
     def to_document(self) -> str:
         """Convert table description to a searchable document string."""
@@ -51,13 +53,16 @@ class TableDescription:
         FIX: ChromaDB only accepts str/int/float/bool in metadata values.
         Serialize lists and dicts to JSON strings.
         """
-        return {
+        md = {
             "table_name": self.table_name,
             "description": self.description,
             "columns_json": json.dumps(self.columns),              # list of dicts → JSON string
             "relationships_json": json.dumps(self.relationships),  # list → JSON string
             "sample_values_json": json.dumps(self.sample_values),  # dict → JSON string
         }
+        if self.session_id:
+            md["session_id"] = self.session_id
+        return md
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -76,7 +81,8 @@ class TableDescription:
             description=metadata["description"],
             columns=json.loads(metadata.get("columns_json", "[]")),
             relationships=json.loads(metadata.get("relationships_json", "[]")),
-            sample_values=json.loads(metadata.get("sample_values_json", "{}"))
+            sample_values=json.loads(metadata.get("sample_values_json", "{}")),
+            session_id=metadata.get("session_id")
         )
 
 

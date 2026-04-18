@@ -45,15 +45,21 @@ class Storyteller:
 
     ### CRITICAL ANTI-HALLUCINATION RULES:
     1. ZERO EXTERNAL KNOWLEDGE: You must absolutely NEVER use your pre-trained knowledge to answer the question. If you know the answer but it's not in the provided context, you must pretend you do not know it.
-    2. STRICT GROUNDING: If the exact answer cannot be explicitly found in the SQL Results or Document Context provided below, you MUST reply verbatim with: "I do not have enough information in the current data to answer that."
+    2. STRICT GROUNDING: If the exact answer cannot be explicitly found in the SQL Results or Document Context provided below, you MUST reply verbatim with: "I do not have enough information in the current data to answer that." Exception: You can assume the data naturally satisfies any conditions explicitly written in the Generated SQL Query.
     3. NO GUESSING OR INFERENCE: Do not extrapolate, infer, guess, or assume missing data. Do not attempt to fill in the blanks.
     4. DIRECT CITATION: Base every single statement you make directly on the provided data.
     5. FORMATTING: Be concise. If SQL data is provided, state the numbers clearly and exactly as they appear. Do not mention SQL, databases, or tables in your final answer.
+    6. ENSURE CONSISTENCY: Your explanation must ONLY refer to conditions and filters explicitly present in the user's query. Avoid adding extra thresholds or assumptions that were not asked for.
+    7. SEAMLESS MERGING: Synthesize the structured and unstructured data into a single cohesive, natural response. NEVER use phrases like "SQL Results", "Document Context", "Structured Data", or "Unstructured Data". Talk directly about the facts as if you naturally know them.
+    8. CONTEXTUAL AWARENESS: You are provided with the exact SQL Query that generated the SQL Results. You MUST assume that the SQL Results completely satisfy any conditions present in the SQL query (like 'status = active'), even if those specific columns (like 'status') are omitted from the final SQL Results view.
     """
 
     USER_PROMPT = """
     ### User Question:
     {user_question}
+
+    ### Generated SQL Query (Context):
+    {sql_query}
 
     ### SQL Results (Structured Data):
     {sql_results}
@@ -153,7 +159,8 @@ class Storyteller:
         sql_results: Optional[List[Dict[str, Any]]] = None,
         doc_context: Optional[List[Dict[str, Any]]] = None,
         route: str = "sql",
-        stream: bool = False
+        stream: bool = False,
+        sql_query: Optional[str] = None
     ):
         """
         Generate a natural language answer with strict hallucination guardrails.
@@ -165,6 +172,7 @@ class Storyteller:
         # Assemble the user prompt
         prompt = self.USER_PROMPT.format(
             user_question=user_question,
+            sql_query=sql_query if sql_query else "No SQL query executed.",
             sql_results=formatted_sql,
             doc_context=formatted_doc
         )

@@ -219,26 +219,52 @@ class AIQuerySystem:
             self.logger.warning(f"Document processor init failed: {e}")
             self.doc_processor = None
 
-    def upload_file(self, file_path: str, original_file_name: Optional[str] = None) -> Dict[str, Any]:
+    def upload_file(self, file_path: str, original_file_name: Optional[str] = None, session_id: Optional[str] = None) -> Dict[str, Any]:
         """Upload and process a single file (CSV/Excel/JSON → SQL, PDF/TXT/DOCX → RAG)."""
         if not self.doc_processor:
             return {"success": False, "message": "Document processor not initialized"}
-        return self.doc_processor.process(file_path, original_file_name=original_file_name)
+        result = self.doc_processor.process(file_path, original_file_name=original_file_name, session_id=session_id)
+        if result.get("success"):
+            self.clear_cache()
+            self.logger.info("Cleared semantic cache after successful file upload.")
+        return result
 
-    def upload_files(self, file_paths: List[str]) -> List[Dict[str, Any]]:
+    def upload_files(self, file_paths: List[str], session_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """Upload multiple files at once."""
         if not self.doc_processor:
             return [{"success": False, "message": "Document processor not initialized"}]
-        return self.doc_processor.process_many(file_paths)
+        results = self.doc_processor.process_many(file_paths, session_id=session_id)
+        if any(r.get("success") for r in results):
+            self.clear_cache()
+            self.logger.info("Cleared semantic cache after successful file uploads.")
+        return results
 
-    def list_uploads(self) -> Dict[str, Any]:
+    def list_uploads(self, session_id: Optional[str] = None) -> Dict[str, Any]:
         """Show all currently loaded schemas and RAG documents."""
         if not self.doc_processor:
             return {"schemas": [], "documents": []}
         return {
-            "schemas":   self.doc_processor.list_loaded_schemas(),
+            "schemas":   self.doc_processor.list_loaded_schemas(session_id=session_id),
             "documents": self.doc_processor.list_loaded_documents()
         }
+
+    def delete_schema(self, schema_id: str) -> bool:
+        if not self.doc_processor:
+            return False
+        success = self.doc_processor.delete_schema(schema_id)
+        if success:
+            self.clear_cache()
+            self.logger.info(f"Cleared semantic cache after deleting schema: {schema_id}")
+        return success
+
+    def delete_document(self, file_name: str) -> bool:
+        if not self.doc_processor:
+            return False
+        success = self.doc_processor.delete_document(file_name)
+        if success:
+            self.clear_cache()
+            self.logger.info(f"Cleared semantic cache after deleting document: {file_name}")
+        return success
 
 # Change the signature to include target_source
     def run_pipeline(
@@ -247,24 +273,23 @@ class AIQuerySystem:
         context_filter: Optional[Dict[str, Any]] = None,
         authorized_docs: Optional[List[str]] = None,
         target_source: Optional[str] = None,
-        tenant_id: Optional[str] = None
+        tenant_id: Optional[str] = None,
+        skip_cache: bool = False
     ):
         start_time = time.time()
         self.logger.info(f"Query: {user_query}")
 
         yield {"type": "status", "message": "Checking semantic cache..."}
         # Step 1: Semantic Cache Check
-        if self.cache:
+        if self.cache and not skip_cache:
             try:
-                import json
-                cache_key = user_query
+                filters = {}
                 if tenant_id:
-                    cache_key = f"{tenant_id}::{cache_key}"
+                    filters["tenant_id"] = tenant_id
                 if context_filter:
-                    ctx_str = json.dumps(context_filter, sort_keys=True)
-                    cache_key = f"{cache_key}__CTX__{ctx_str}"
+                    filters["context_filter"] = context_filter
 
-                cached = self.cache.get(cache_key)
+                cached = self.cache.get(user_query, filters=filters)
                 if cached:
                     cached_results = cached.get("metadata", {}).get("results")
                     if cached_results:
@@ -297,11 +322,11 @@ class AIQuerySystem:
 
             target_lower = target_source.lower()
             if any(target_lower.endswith(ext) for ext in structured_exts):
-                if route == "rag":
+                if route in ["rag", "both"]:
                     route = "sql"
                     self.logger.info(f"[ROUTER OVERRIDE] Forced SQL route for structured file: {target_source}")
             elif any(target_lower.endswith(ext) for ext in unstructured_exts):
-                if route == "sql":
+                if route in ["sql", "both"]:
                     route = "rag"
                     self.logger.info(f"[ROUTER OVERRIDE] Forced RAG route for unstructured file: {target_source}")
 
@@ -341,8 +366,14 @@ class AIQuerySystem:
                     target_table = Path(target_source).stem.lower().replace(" ", "_").replace("-", "_")
                     schema_where = {"table_name": target_table}
 
-            schemas = self.tag.retrieve_schemas(search_term, top_k=2, where_filter=schema_where)
-            schema_context = "\n\n".join([s.to_document()[:800] for s in schemas])
+            if context_filter:
+                if schema_where is None:
+                    schema_where = context_filter
+                else:
+                    schema_where = {"$and": [schema_where, context_filter]}
+
+            schemas = self.tag.retrieve_schemas(search_term, top_k=10, where_filter=schema_where)
+            schema_context = "\n\n".join([s.to_document() for s in schemas])
             self.logger.info(f"[TAG] Retrieved schemas: {[s.table_name for s in schemas]} with filter: {schema_where}")
 
         # --- RAG DOCUMENT RETRIEVAL ---
@@ -448,7 +479,8 @@ class AIQuerySystem:
             sql_results=sql_results,
             doc_context=docs,
             route=route,
-            stream=True
+            stream=True,
+            sql_query=sql_query
         )
         
         full_answer = ""
@@ -471,14 +503,12 @@ class AIQuerySystem:
 
         if self.cache and (sql_results or docs):
             try:
-                import json
-                cache_key = user_query
+                metadata = {"route": route, "results": sql_results}
                 if tenant_id:
-                    cache_key = f"{tenant_id}::{cache_key}"
+                    metadata["tenant_id"] = tenant_id
                 if context_filter:
-                    ctx_str = json.dumps(context_filter, sort_keys=True)
-                    cache_key = f"{cache_key}__CTX__{ctx_str}"
-                self.cache.set(cache_key, full_answer, metadata={"route": route, "results": sql_results})
+                    metadata["context_filter"] = context_filter
+                self.cache.set(user_query, full_answer, metadata=metadata)
                 self.logger.info(f"[CACHE] Stored locally isolated cache entry.")
             except Exception as e:
                 self.logger.warning(f"Cache write failed: {e}")
