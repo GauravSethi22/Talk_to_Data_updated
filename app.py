@@ -24,7 +24,6 @@ load_dotenv()
 import pymongo
 import bcrypt
 
-
 @st.cache_resource
 def get_db():
     mongo_uri = os.environ.get("MONGO_URI")
@@ -390,8 +389,8 @@ def inject_custom_css():
         [data-testid="stChatInput"] textarea {
             color: #0f172a !important;
             font-size: 0.95rem !important;
-            padding-top: 1rem !important;
-            padding-bottom: 1rem !important;
+            padding-top: 0.85rem !important;
+            padding-bottom: 0.85rem !important;
         }
 
         div[data-testid="stPopover"] > button {
@@ -490,11 +489,9 @@ def inject_custom_css():
         </style>
     """, unsafe_allow_html=True)
 
-
 def chunk_text(text: str, chunk_size: int = 300) -> list:
     words = text.split()
     return [' '.join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size)]
-
 
 def render_loading_screen():
     loading_html = """
@@ -540,7 +537,6 @@ def render_loading_screen():
     """
     st.markdown(loading_html, unsafe_allow_html=True)
 
-
 def initialize_session_state():
     if "query_system" not in st.session_state:
         loading_placeholder = st.empty()
@@ -561,7 +557,6 @@ def initialize_session_state():
         st.session_state.active_filters = [st.session_state.current_session_id]
 
     st.session_state.messages = st.session_state.chat_sessions[st.session_state.current_session_id]
-
 
 def display_lineage(lineage):
     import json
@@ -613,7 +608,7 @@ def parse_and_add_documents(uploaded_files):
             tmp_path = tmp.name
 
         try:
-            result = system.upload_file(tmp_path, original_file_name=uploaded_file.name)
+            result = system.upload_file(tmp_path, original_file_name=uploaded_file.name, session_id=st.session_state.current_session_id)
             result["file_name"] = uploaded_file.name
 
             if result["success"]:
@@ -719,9 +714,24 @@ def render_sidebar():
 
             icon = ":material/chat_bubble:" if session_id == st.session_state.current_session_id else ":material/chat_bubble_outline:"
 
-            if st.button(title, key=f"btn_{session_id}", icon=icon, type="tertiary", use_container_width=True):
-                st.session_state.current_session_id = session_id
-                st.rerun()
+            col1, col2 = st.columns([0.85, 0.15], vertical_alignment="center")
+            with col1:
+                if st.button(title, key=f"btn_{session_id}", icon=icon, type="tertiary", use_container_width=True):
+                    st.session_state.current_session_id = session_id
+                    st.rerun()
+            with col2:
+                if st.button("", icon=":material/close:", key=f"del_chat_{session_id}", type="tertiary"):
+                    del st.session_state.chat_sessions[session_id]
+                    if st.session_state.current_session_id == session_id:
+                        if st.session_state.chat_sessions:
+                            st.session_state.current_session_id = list(st.session_state.chat_sessions.keys())[-1]
+                        else:
+                            st.session_state.session_counter += 1
+                            new_id = f"Session {st.session_state.session_counter}"
+                            st.session_state.chat_sessions[new_id] = []
+                            st.session_state.current_session_id = new_id
+                    save_chat_sessions()
+                    st.rerun()
 
         st.markdown("<br>" * 3, unsafe_allow_html=True)
 
@@ -734,7 +744,7 @@ def render_sidebar():
                 with c2: st.metric("Docs", stats['tag_collections']['documents'])
                 with c3: st.metric("Schemas", stats['tag_collections']['schemas'])
 
-                uploads = st.session_state.query_system.list_uploads()
+                uploads = st.session_state.query_system.list_uploads(session_id=st.session_state.current_session_id)
 
                 # Fetch only user owned documents for sidebar display visibility
                 user_email = st.session_state.get("user_email")
@@ -746,9 +756,16 @@ def render_sidebar():
                 if uploads["schemas"] or filtered_docs:
                     with st.expander("Loaded Data Sources", icon=":material/database:"):
                         if uploads["schemas"]:
-                            st.caption("SQL Tables")
+                            st.caption("SQL Tables (This Chat)")
                             for s in uploads["schemas"]:
-                                st.markdown(f"- `{s}`")
+                                row_c1, row_c2 = st.columns([0.8, 0.2], vertical_alignment="center")
+                                with row_c1:
+                                    st.markdown(f"`{s}`")
+                                with row_c2:
+                                    if st.button("", icon=":material/delete:", key=f"del_{s}", help="Delete table"):
+                                        if st.session_state.query_system.delete_schema(s):
+                                            st.toast(f"Deleted {s}")
+                                            st.rerun()
                         if filtered_docs:
                             st.caption("RAG Documents")
                             seen_files = set()
@@ -756,7 +773,14 @@ def render_sidebar():
                                 fname = d.get("file_name", d["id"])
                                 if fname not in seen_files:
                                     seen_files.add(fname)
-                                    st.markdown(f"- {fname}")
+                                    row_c1, row_c2 = st.columns([0.8, 0.2], vertical_alignment="center")
+                                    with row_c1:
+                                        st.markdown(f"- {fname}")
+                                    with row_c2:
+                                        if st.button("", icon=":material/delete:", key=f"del_doc_{fname}", help="Delete document"):
+                                            if st.session_state.query_system.delete_document(fname):
+                                                st.toast(f"Deleted {fname}")
+                                                st.rerun()
 
                 if st.button("Clear Cache", icon=":material/mop:", use_container_width=True):
                     count = st.session_state.query_system.cache.clear()
@@ -1208,6 +1232,14 @@ def main():
                     if "lineage" in message:
                         display_lineage(message["lineage"])
 
+                        if st.button("🔄 Regenerate (Skip Cache)", key=f"regen_{i}", help="Bypass semantic cache and fetch fresh data"):
+                            user_msg = st.session_state.messages[i-1]["content"] if i > 0 else ""
+                            st.session_state.messages = st.session_state.messages[:i-1]
+                            st.session_state.messages.append({"role": "user", "content": user_msg})
+                            st.session_state.skip_cache_next = True
+                            save_chat_sessions()
+                            st.rerun()
+
                         if getattr(message["lineage"], "sql_query", None):
                             with st.expander("📝 Edit & Re-run SQL"):
                                 new_sql = st.text_area("SQL Query", value=message["lineage"].sql_query, key=f"edit_sql_{i}", height=150)
@@ -1260,7 +1292,8 @@ def main():
                 accept_multiple_files=True,
                 type=['csv', 'pdf', 'json', 'xlsx', 'xls', 'txt', 'docx', 'md'],
                 label_visibility="collapsed",
-                help="Structured (CSV, Excel, JSON) → SQL queryable | Unstructured (PDF, TXT, DOCX, MD) → RAG knowledge base"
+                help="Structured (CSV, Excel, JSON) → SQL queryable | Unstructured (PDF, TXT, DOCX, MD) → RAG knowledge base",
+                key=f"uploader_{st.session_state.current_session_id}"
             )
             if uploaded_files and st.button("Ingest Files", icon=":material/upload_file:", use_container_width=True):
                 with st.spinner("Processing semantics..."):
@@ -1278,6 +1311,12 @@ def main():
                 default=[st.session_state.current_session_id],
                 help="By default, AI only sees documents uploaded in the current chat. Add older sessions here to pull their documents into this chat's brain."
             )
+            
+            st.divider()
+            if st.button("🗑️ Clear Semantic Cache", use_container_width=True, help="Force wipe the global cache if the AI is repeatedly answering with outdated info."):
+                if st.session_state.query_system:
+                    cleared = st.session_state.query_system.clear_cache()
+                    st.toast(f"Cleared {cleared} entries from cache!", icon=":material/delete:")
 
     with attach_col:
         prompt = st.chat_input("Enter a prompt here")
@@ -1299,12 +1338,15 @@ def main():
                         user_record = users_collection.find_one({"email": st.session_state.user_email}) if st.session_state.get("user_email") else None
                         authorized_docs = user_record.get("documents", []) if user_record else []
 
+                        skip_cache = st.session_state.pop("skip_cache_next", False)
+
                         pipeline_gen = st.session_state.query_system.run_pipeline(
                             user_query=user_prompt,
                             context_filter=context_filter,
                             authorized_docs=authorized_docs,
                             target_source=st.session_state.get("target_source"),
-                            tenant_id=st.session_state.get("user_email")
+                            tenant_id=st.session_state.get("user_email"),
+                            skip_cache=skip_cache
                         )
 
                         status_container = st.status("Analyzing Request...", expanded=True)
@@ -1351,3 +1393,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+

@@ -57,7 +57,10 @@ Plan:"""
 
 CODER_PROMPT = """SQL expert. Write ONE raw PostgreSQL query only. No explanation, no markdown.
 You MUST strictly use only the tables and columns explicitly provided in the Schema below. Do not hallucinate any columns or tables.
-Pay close attention to 'Foreign Keys / Joins' and 'Sample Value' annotations to formulate correct JOIN conditions and filters.
+CRITICAL: You MUST use the EXACT table and column names as they appear in the Schema, even if they contain spelling mistakes (e.g. use 'attedance' if that is what the schema says, do NOT auto-correct it to 'attendance').
+Pay close attention to 'Foreign Keys / Joins' to formulate correct JOIN conditions. Use 'Sample Value' annotations ONLY to understand the data format, NEVER use them as hardcoded filters unless the user explicitly asked for that exact value.
+CRITICAL: For string comparisons in the WHERE clause, ALWAYS use case-insensitive matching (ILIKE) instead of strict equality (=), to prevent case-sensitivity bugs. Also, wrap search terms with % wildcards if doing partial matches.
+CRITICAL: You MUST ALWAYS include any columns used in the WHERE or HAVING clauses in your SELECT clause. For example, if you filter by "status = 'active'" or "salary > 50000", you MUST include 'status' or 'salary' in the SELECT statement. This guarantees the final Storyteller AI has enough data to confidently answer.
 
 Plan: {plan}
 Schema: {schema_context}

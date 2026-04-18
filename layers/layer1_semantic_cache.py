@@ -73,12 +73,13 @@ class SemanticCache:
         embedding2 = embedding2.reshape(1, -1)
         return cosine_similarity(embedding1, embedding2)[0][0]
 
-    def get(self, query: str) -> Optional[Dict[str, Any]]:
+    def get(self, query: str, filters: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
         """
         Check if a query has a cached response.
 
         Args:
             query: The user query to check
+            filters: Optional dictionary of key-value pairs that must match the cached metadata.
 
         Returns:
             Cached response dict if similarity > threshold, None otherwise
@@ -91,6 +92,16 @@ class SemanticCache:
             if cached_data:
                 try:
                     cached = json.loads(cached_data)
+                    
+                    if filters:
+                        match = True
+                        for k, v in filters.items():
+                            if cached.get("metadata", {}).get(k) != v:
+                                match = False
+                                break
+                        if not match:
+                            continue
+
                     cached_embedding = np.array(cached["embedding"])
 
                     similarity = self._compute_similarity(
@@ -135,9 +146,12 @@ class SemanticCache:
             "metadata": metadata or {}
         }
 
-        # Use hash of query as key for uniqueness
+        # Use hash of query and metadata for uniqueness
         import hashlib
-        cache_key = f"cache:{hashlib.md5(query.encode()).hexdigest()}"
+        unique_str = query
+        if metadata:
+            unique_str += json.dumps(metadata, sort_keys=True, default=str)
+        cache_key = f"cache:{hashlib.md5(unique_str.encode()).hexdigest()}"
 
         self.redis_client.setex(
             cache_key,

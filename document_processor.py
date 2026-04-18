@@ -95,7 +95,7 @@ class StructuredFileLoader:
             logger.error(f"Failed to write table '{table_name}': {e}")
             return False
 
-    def build_table_description(self, df, table_name: str, file_name: str):
+    def build_table_description(self, df, table_name: str, file_name: str, session_id: Optional[str] = None):
         from layers.layer3_tag import TableDescription
         columns = []
         sample_values = {}
@@ -119,7 +119,8 @@ class StructuredFileLoader:
             ),
             columns=columns,
             relationships=[],
-            sample_values=sample_values
+            sample_values=sample_values,
+            session_id=session_id
         )
 
 
@@ -218,16 +219,16 @@ class DocumentProcessor:
             from sqlalchemy import create_engine
             self._admin_engine = create_engine(admin_db_url, pool_pre_ping=True)
 
-    def process(self, file_path: str, original_file_name: Optional[str] = None) -> Dict[str, Any]:
+    def process(self, file_path: str, original_file_name: Optional[str] = None, session_id: Optional[str] = None) -> Dict[str, Any]:
         """Fix: properly handles original_file_name mapping"""
         file_path = str(file_path)
         file_name = original_file_name or Path(file_path).name
         file_type = classify_file(file_name)
 
         if file_type == "structured":
-            return self._process_structured(file_path, file_name)
+            return self._process_structured(file_path, file_name, session_id)
         elif file_type == "unstructured":
-            return self._process_unstructured(file_path, file_name)
+            return self._process_unstructured(file_path, file_name, session_id)
         else:
             return {
                 "success":   False,
@@ -236,18 +237,41 @@ class DocumentProcessor:
                 "message":   f"Unsupported file type: {Path(file_name).suffix}."
             }
 
-    def process_many(self, file_paths: List[str]) -> List[Dict[str, Any]]:
-        return [self.process(p) for p in file_paths]
+    def process_many(self, file_paths: List[str], session_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        return [self.process(p, session_id=session_id) for p in file_paths]
 
-    def list_loaded_schemas(self) -> List[str]:
+    def list_loaded_schemas(self, session_id: Optional[str] = None) -> List[str]:
         try:
-            count = self.tag.schema_collection.count()
-            if count == 0:
-                return []
-            results = self.tag.schema_collection.get()
+            where_filter = {"session_id": session_id} if session_id else None
+            if where_filter:
+                results = self.tag.schema_collection.get(where=where_filter)
+            else:
+                results = self.tag.schema_collection.get()
             return results.get("ids", [])
         except Exception:
             return []
+
+    def delete_schema(self, schema_id: str) -> bool:
+        try:
+            self.tag.schema_collection.delete(ids=[schema_id])
+            if self._admin_engine:
+                from sqlalchemy import text
+                with self._admin_engine.connect() as conn:
+                    quoted_table = self._admin_engine.dialect.identifier_preparer.quote(schema_id)
+                    conn.execute(text(f"DROP TABLE IF EXISTS {quoted_table} CASCADE;"))
+                    conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to delete schema '{schema_id}': {e}")
+            return False
+
+    def delete_document(self, file_name: str) -> bool:
+        try:
+            self.tag.docs_collection.delete(where={"file_name": file_name})
+            return True
+        except Exception as e:
+            logger.error(f"Failed to delete document '{file_name}': {e}")
+            return False
 
     def list_loaded_documents(self) -> List[Dict[str, str]]:
         try:
@@ -264,9 +288,16 @@ class DocumentProcessor:
         except Exception:
             return []
 
-    def _process_structured(self, file_path: str, file_name: str) -> Dict[str, Any]:
+    def _process_structured(self, file_path: str, file_name: str, session_id: Optional[str] = None) -> Dict[str, Any]:
         try:
+            import re
             df, table_name = self._structured_loader.load(file_path, file_name)
+            table_name = re.sub(r'[^a-z0-9_]', '', table_name) # Clean up table name
+            if session_id:
+                # Sanitize session_id for Postgres (max 63 chars, start with letter or underscore)
+                clean_session = re.sub(r'[^a-z0-9_]', '', str(session_id).lower().replace('-', '_'))
+                table_name = f"sess_{clean_session[:20]}_{table_name}"
+
 
             db_written = False
             if self._admin_engine:
@@ -275,9 +306,16 @@ class DocumentProcessor:
                 )
 
             table_desc = self._structured_loader.build_table_description(
-                df, table_name, file_name
+                df, table_name, file_name, session_id=session_id
             )
+            # Inject session_id into schema metadata for scoped retrieval
+            if session_id:
+                table_desc.description += f" [Session ID: {session_id}]"
+                # If we modify add_schema or the metadata manually, we can pass it here. For now it's in description, but we must modify where TAG saves it if we want to filter by metadata.
+                # Since TAGRetrieval doesn't easily expose metadata in add_schema (it builds it internally), let's just make sure it's handled. Wait, TAGRetrieval adds `table_name` as metadata in `add_schema`.
+            
             self.tag.add_schema(table_desc)
+
 
             return {
                 "success":    True,
@@ -297,7 +335,7 @@ class DocumentProcessor:
                 "message":   f"Failed: {str(e)}"
             }
 
-    def _process_unstructured(self, file_path: str, file_name: str) -> Dict[str, Any]:
+    def _process_unstructured(self, file_path: str, file_name: str, session_id: Optional[str] = None) -> Dict[str, Any]:
         try:
             text = self._unstructured_loader.load(file_path)
             if not text.strip():
@@ -319,7 +357,8 @@ class DocumentProcessor:
                         "file_name":  file_name,
                         "chunk_index": str(i),
                         "total_chunks": str(len(chunks)),
-                        "file_type":  Path(file_name).suffix.lower()
+                        "file_type":  Path(file_name).suffix.lower(),
+                        **({"session_id": session_id} if session_id else {})
                     }
                 )
                 doc_ids.append(doc_id)
